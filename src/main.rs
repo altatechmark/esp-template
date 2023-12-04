@@ -1,74 +1,49 @@
-#![no_std]
-#![no_main]
+use anyhow::Result;
+use embedded_hal::blocking::delay::DelayMs;
+use esp_idf_svc::hal::{
+    delay::FreeRtos,
+    i2c::{I2cConfig, I2cDriver},
+    peripherals::Peripherals,
+    prelude::*,
+};
+use shtcx::{self, PowerMode};
 
-{% if alloc -%}
-extern crate alloc;
-use core::mem::MaybeUninit;
-{% endif -%}
-use esp_backtrace as _;
-use esp_println::println;
-use hal::{clock::ClockControl, peripherals::Peripherals, prelude::*, Delay};
+// Goals of this exercise:
+// - Part1: Instantiate i2c peripheral
+// - Part1: Implement one sensor, print sensor values
+// - Part2: Implement second sensor on same bus to solve an ownership problem
 
-{% if wifi -%}
-use esp_wifi::{initialize, EspWifiInitFor};
+fn main() -> Result<()> {
+    esp_idf_svc::sys::link_patches();
 
-{% if arch == "riscv" -%}
-use hal::{systimer::SystemTimer, Rng};
-{% else -%}
-use hal::{timer::TimerGroup, Rng};
-{% endif -%}
-{% endif -%}
+    let peripherals = Peripherals::take().unwrap();
 
-{% if alloc -%}
-#[global_allocator]
-static ALLOCATOR: esp_alloc::EspHeap = esp_alloc::EspHeap::empty();
+    // 1. Instanciate the SDA and SCL pins, correct pins are in the training material.
+    let sda = peripherals.pins.gpio10;
+    let scl = peripherals.pins.gpio8;
+    // 2. Instanciate the i2c peripheral
+    let config = I2cConfig::new().baudrate(400.kHz().into());
+    let i2c = I2cDriver::new(peripherals.i2c0, sda, scl, &config)?;
 
-fn init_heap() {
-    const HEAP_SIZE: usize = 32 * 1024;
-    static mut HEAP: MaybeUninit<[u8; HEAP_SIZE]> = MaybeUninit::uninit();
+    // 3. Create an instance of the SHTC3 sensor.
+    let mut sht = shtcx::shtc3(i2c);
 
-    unsafe {
-        ALLOCATOR.init(HEAP.as_mut_ptr() as *mut u8, HEAP_SIZE);
-    }
-}
-{% endif -%}
-#[entry]
-fn main() -> ! {
-    {%- if alloc %}
-    init_heap();
-    {%- endif %}
-    let peripherals = Peripherals::take();
-    let system = peripherals.SYSTEM.split();
+    // 4. Read and print the sensor's device ID.
+    let device_id = sht.device_identifier().unwrap();
+    println!("Device ID SHTC3: {:#02x}", device_id);
 
-    let clocks = ClockControl::max(system.clock_control).freeze();
-    let mut delay = Delay::new(&clocks);
-
-    {% if logging -%}
-    // setup logger
-    // To change the log_level change the env section in .cargo/config.toml
-    // or remove it and set ESP_LOGLEVEL manually before running cargo run
-    // this requires a clean rebuild because of https://github.com/rust-lang/cargo/issues/10358
-    esp_println::logger::init_logger_from_env();
-    log::info!("Logger is setup");
-    {% endif -%}
-    println!("Hello world!");
-    {% if wifi -%}
-    {% if arch == "riscv" -%}
-    let timer = SystemTimer::new(peripherals.SYSTIMER).alarm0;
-    {% else -%}
-    let timer = TimerGroup::new(peripherals.TIMG1, &clocks).timer0;
-    {% endif -%}
-    let _init = initialize(
-        EspWifiInitFor::Wifi,
-        timer,
-        Rng::new(peripherals.RNG),
-        system.radio_clock_control,
-        &clocks,
-    )
-    .unwrap();
-    {% endif -%}
     loop {
-        println!("Loop...");
-        delay.delay_ms(500u32);
+        // 5. This loop initiates measurements, reads values and prints humidity in % and Temperature in °C.
+        sht.start_measurement(PowerMode::NormalMode).unwrap();
+        FreeRtos.delay_ms(100u32);
+        let measurement = sht.get_measurement_result().unwrap();
+
+        println!(
+            "TEMP: {:.2} °C | HUM: {:.2} %",
+            measurement.temperature.as_degrees_celsius(),
+            measurement.humidity.as_percent(),
+        );
+
+        FreeRtos.delay_ms(500u32);
     }
 }
